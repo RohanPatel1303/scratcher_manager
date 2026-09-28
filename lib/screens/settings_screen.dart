@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../models/models.dart';
 import '../models/settings.dart';
@@ -15,9 +16,15 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  List<int>? _slotsPerLot;
+  /// Slots for every lot seen on this screen, including lots removed by
+  /// lowering the lot count, so typing "12" (which passes through "1") does
+  /// not lose lot 2's slots.
+  List<int>? _lotSizes;
+  int _lotCount = 0;
   Map<int, int>? _tickets;
   String? _error;
+
+  List<int> get _slotsPerLot => _lotSizes!.take(_lotCount).toList();
 
   @override
   void initState() {
@@ -25,16 +32,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
     widget.service.getSettings().then((s) {
       if (!mounted) return;
       setState(() {
-        _slotsPerLot = [...s.slotsPerLot];
+        _lotSizes = [...s.slotsPerLot];
+        _lotCount = s.lotCount;
         _tickets = {for (final p in kTicketPrices) p: s.ticketsForPrice(p)};
       });
     });
   }
 
+  void _setLotCount(int n) {
+    final sizes = _lotSizes!;
+    while (sizes.length < n) {
+      sizes.add(sizes.isEmpty ? 4 : sizes.last);
+    }
+    _lotCount = n;
+  }
+
   Future<void> _save() async {
+    FocusScope.of(context).unfocus();
     try {
       await widget.service.updateSettings(
-        StoreSettings(slotsPerLot: _slotsPerLot!, ticketsPerBook: _tickets!),
+        StoreSettings(slotsPerLot: _slotsPerLot, ticketsPerBook: _tickets!),
       );
       if (!mounted) return;
       Navigator.pop(context);
@@ -43,11 +60,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  Widget _stepper(
+  Widget _numberRow(
     String label,
     int value,
     ValueChanged<int> onChanged, {
     int min = 1,
+    int maxDigits = 2,
   }) {
     return ListTile(
       title: Text(label),
@@ -60,11 +78,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
             icon: const Icon(Icons.remove_circle_outline),
           ),
           SizedBox(
-            width: 40,
-            child: Text(
-              '$value',
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.titleMedium,
+            width: 56,
+            child: _NumberField(
+              label: label,
+              value: value,
+              min: min,
+              maxDigits: maxDigits,
+              onChanged: onChanged,
             ),
           ),
           IconButton(
@@ -79,7 +99,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final slots = _slotsPerLot;
+    final sizes = _lotSizes;
     final tickets = _tickets;
     final theme = Theme.of(context);
     return Scaffold(
@@ -87,14 +107,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
         title: const Text('Settings'),
         actions: [
           TextButton(
-            onPressed: slots == null ? null : _save,
+            onPressed: sizes == null ? null : _save,
             child: const Text('Save'),
           ),
         ],
       ),
-      body: slots == null || tickets == null
+      body: sizes == null || tickets == null
           ? const Center(child: CircularProgressIndicator())
           : ListView(
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
               padding: const EdgeInsets.only(bottom: 32),
               children: [
                 if (_error != null)
@@ -106,27 +127,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                   ),
                 _header('Lots'),
-                _stepper('Number of lots', slots.length, (n) {
-                  setState(() {
-                    if (n > slots.length) {
-                      slots.add(slots.isEmpty ? 4 : slots.last);
-                    } else {
-                      slots.removeLast();
-                    }
-                  });
-                }),
-                for (var i = 0; i < slots.length; i++)
-                  _stepper(
+                _numberRow(
+                  'Number of lots',
+                  _lotCount,
+                  (n) => setState(() => _setLotCount(n)),
+                ),
+                for (var i = 0; i < _lotCount; i++)
+                  _numberRow(
                     'Lot ${i + 1} slots',
-                    slots[i],
-                    (n) => setState(() => slots[i] = n),
+                    sizes[i],
+                    (n) => setState(() => sizes[i] = n),
                   ),
                 _header('Tickets per book'),
                 for (final price in kTicketPrices)
-                  _stepper(
+                  _numberRow(
                     '\$$price book',
                     tickets[price]!,
                     (n) => setState(() => tickets[price] = n),
+                    maxDigits: 3,
                   ),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
@@ -149,4 +167,95 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ?.copyWith(fontWeight: FontWeight.w700),
     ),
   );
+}
+
+/// Whole-number field that opens the number pad. Reports each valid value as
+/// it is typed; an empty or too-small entry goes back to the last valid value
+/// when the field loses focus.
+class _NumberField extends StatefulWidget {
+  const _NumberField({
+    required this.label,
+    required this.value,
+    required this.min,
+    required this.maxDigits,
+    required this.onChanged,
+  });
+
+  final String label;
+  final int value;
+  final int min;
+  final int maxDigits;
+  final ValueChanged<int> onChanged;
+
+  @override
+  State<_NumberField> createState() => _NumberFieldState();
+}
+
+class _NumberFieldState extends State<_NumberField> {
+  late final _controller = TextEditingController(text: '${widget.value}');
+  final _focus = FocusNode();
+
+  @override
+  void initState() {
+    super.initState();
+    _focus.addListener(() {
+      if (_focus.hasFocus) {
+        _controller.selection = TextSelection(
+          baseOffset: 0,
+          extentOffset: _controller.text.length,
+        );
+      } else {
+        _controller.text = '${widget.value}';
+      }
+    });
+  }
+
+  @override
+  void didUpdateWidget(_NumberField old) {
+    super.didUpdateWidget(old);
+    // Follow the − / + buttons, but leave the text alone while it already
+    // shows the value (for example mid-typing).
+    if (widget.value != old.value &&
+        int.tryParse(_controller.text) != widget.value) {
+      _controller.text = '${widget.value}';
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    _focus.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: widget.label,
+      child: TextField(
+        controller: _controller,
+        focusNode: _focus,
+        textAlign: TextAlign.center,
+        keyboardType: TextInputType.number,
+        textInputAction: TextInputAction.done,
+        inputFormatters: [
+          FilteringTextInputFormatter.digitsOnly,
+          LengthLimitingTextInputFormatter(widget.maxDigits),
+        ],
+        style: Theme.of(context).textTheme.titleMedium,
+        decoration: const InputDecoration(
+          isDense: true,
+          contentPadding: EdgeInsets.symmetric(vertical: 8),
+          border: OutlineInputBorder(),
+        ),
+        onTapOutside: (_) => _focus.unfocus(),
+        onChanged: (text) {
+          final n = int.tryParse(text);
+          if (n != null && n >= widget.min && n != widget.value) {
+            widget.onChanged(n);
+          }
+        },
+      ),
+    );
+  }
 }
